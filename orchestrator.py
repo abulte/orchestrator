@@ -8,7 +8,9 @@ db = dataset_lib.connect("sqlite:///orchestrator.db")
 
 EXCLUDED_PATTERNS = [
     "resources/donnees-temps-reel-de-mesure-des-concentrations-de-polluants-atmospheriques-reglementes-1",
-    "files.data.gouv.fr/lcsqa/concentrations-de-polluants-atmospheriques-reglementes"
+    "files.data.gouv.fr/lcsqa/concentrations-de-polluants-atmospheriques-reglementes",
+    # already ignored by link-proxy but let's not clobber things up
+    "files.geo.data.gouv.fr/link-proxy/"
 ]
 
 
@@ -35,10 +37,31 @@ def record_run(count, count_ignored):
     })
 
 
-# TODO: iterate on pagination until last_run is reached
-def modified_datasets():
-    r = requests.get("https://www.data.gouv.fr/api/1/datasets/?sort=-last_modified")
+def get_datasets(page):
+    r = requests.get(f"https://www.data.gouv.fr/api/1/datasets/?sort=-last_modified&page={page}")
     return r.json()["data"]
+
+
+def modified_datasets(last_run):
+    got_everything = False
+    results = []
+    page = 1
+
+    while not got_everything:
+        data = get_datasets(page)
+        for d in data:
+            modified = datetime.fromisoformat(d["last_modified"])
+            got_everything = (modified < last_run)
+            if not got_everything:
+                results.append(d)
+            else:
+                break
+        if got_everything:
+            break
+        else:
+            page += 1
+
+    return results
 
 
 def send_to_linkproxy(url):
@@ -54,10 +77,10 @@ def handle_dataset(dataset, last_run):
     count_ignored = 0
     table = db["checks"]
     for resource in dataset["resources"]:
-        modified_date = datetime.fromisoformat(dataset["last_modified"])
+        modified_date = datetime.fromisoformat(resource["last_modified"])
         if last_run > modified_date:
             continue
-        if any([excl in resource.url for excl in EXCLUDED_PATTERNS]):
+        if any([excl in resource["url"] for excl in EXCLUDED_PATTERNS]):
             count_ignored += 1
             continue
         try:
@@ -86,10 +109,10 @@ def handle_dataset(dataset, last_run):
 def run():
     last_run = get_last_run()
     click.echo(f"Last run: {last_run}")
-    datasets = modified_datasets()
+    datasets = modified_datasets(last_run)
     count = 0
     count_ignored = 0
-    with click.progressbar(datasets) as all_datasets:
+    with click.progressbar(datasets, label=f"Analysing {len(datasets)} datasets") as all_datasets:
         for dataset in all_datasets:
             _count, _count_ignored = handle_dataset(dataset, last_run)
             count += _count
